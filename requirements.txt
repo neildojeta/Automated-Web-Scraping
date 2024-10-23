@@ -1,0 +1,6 @@
+pandas
+asyncio
+playwright
+tqdm
+logging
+urllib
