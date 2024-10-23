@@ -50,20 +50,20 @@ async def extract_file_links(page, url, idx, depth=0, max_depth=3):
     timeout = 50000  # 30 seconds
     download_link = None
 
-    if url == "None":
-        return "None"
+    # if url == "None":
+    #     logger.info(f"Row {idx}: No valid download link found on {url}. Returning 'None'.")
+    #     return "None"
 
     while retries > 0:
         try:
-            await page.goto(url, timeout=timeout)
-            await page.wait_for_load_state('networkidle', timeout=timeout)
+            await page.goto(url, wait_until='domcontentloaded', timeout=timeout)
 
             base_url = page.url
 
             # Monitor network requests for a potential download link
             def handle_request(request):
                 nonlocal download_link
-                if request.resource_type in ["xhr", "document"]:
+                if request.resource_type in ["xhr", "document", "fetch"]:
                     if request.url.endswith(('.exe', '.zip', '.dmg', '.msix', '.xz')):
                         download_link = request.url
                         logger.info(f"Row {idx}: (FOUND1)Download link captured from network request: {download_link}")
@@ -114,7 +114,7 @@ async def extract_file_links(page, url, idx, depth=0, max_depth=3):
             except Exception as e:
                 logger.warning(f"Row {idx}: Error finding hrefs or checking download links: {e}")
 
-            logger.info(f"Row {idx}: No valid download link found on {url}")
+            logger.info(f"Row {idx}: No valid download link found on {url}. Returning 'None'.")
             return "None"
 
         except Exception as e:
@@ -126,7 +126,7 @@ async def extract_file_links(page, url, idx, depth=0, max_depth=3):
                 logger.warning(f"Row {idx}: Retry {tries - (retries)} for {url}")
                 await asyncio.sleep(2)
 
-async def process_download_links(df, output_file, concurrency_limit=10):
+async def process_download_links(df, output_file, concurrency_limit=5):
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
         semaphore = asyncio.Semaphore(concurrency_limit)
@@ -135,28 +135,24 @@ async def process_download_links(df, output_file, concurrency_limit=10):
             async with semaphore:
                 page = await browser.new_page()
                 url = row['Download Link']
-                
-                if pd.notna(row.get('Extracted Link')) and row['Extracted Link'] != "None":
-                    logger.info(f"Row {idx}: Skipping, already has an extracted link.")
-                    return row['Extracted Link']
-                
-                if pd.notna(url):
-                    if url == "None":
-                        df.at[idx, 'Extracted Link'] = "None"
-                        df.iloc[[idx]].to_csv(output_file, mode='a', header=False, index=False)
-                        logger.warning(f"Row {idx}: URL is 'None', set Extracted Link to 'None'.")
-                        return "None"
 
-                    result_link = await extract_file_links(page, url, idx)
-                    await page.close()
-                    
-                    df.at[idx, 'Extracted Link'] = result_link
-                    df.iloc[[idx]].to_csv(output_file, mode='a', header=False, index=False)
-                    
-                    return result_link
-                else:
-                    logger.warning(f"Row {idx}: No Download Link found.")
-                    return None
+                # Keep "None" in the output and log accordingly
+                if pd.isna(url) or url == "None":
+                    df.at[idx, 'Extracted Link'] = "None"
+                    # Directly save this row without changes
+                    row.to_frame().T.to_csv(output_file, mode='a', header=False, index=False)
+                    logger.warning(f"Row {idx}: Download Link is 'None', recorded in the output.")
+                    await page.close()  # Close the page and return early
+                    return "None"
+
+                # Process the URL normally if it’s valid
+                result_link = await extract_file_links(page, url, idx)
+                await page.close()
+
+                df.at[idx, 'Extracted Link'] = result_link
+                df.iloc[[idx]].to_csv(output_file, mode='a', header=False, index=False)
+
+                return result_link
 
         tasks = [process_row(idx, row) for idx, row in tqdm(df.iterrows(), total=len(df), desc="Processing download links")]
         await asyncio.gather(*tasks)
@@ -177,7 +173,7 @@ def main():
 
     logger.info("Starting the download button and .exe/.zip link extraction process.")
 
-    concurrency_limit = 10
+    concurrency_limit = 5
     asyncio.run(process_download_links(df, output_file, concurrency_limit))
 
     logger.info(f"Results saved to {output_file}")
